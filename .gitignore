@@ -5,3 +5,4 @@
 .vscode/ipch
 include/wifi_credentials.h
 src/certs/private.key.pem
+local_files/
