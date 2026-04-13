@@ -4,5 +4,8 @@
 .vscode/launch.json
 .vscode/ipch
 include/wifi_credentials.h
+src/certs/
 src/certs/private.key.pem
+src/certs/device.cert.pem
+src/certs/AmazonRootCA1.pem
 local_files/
