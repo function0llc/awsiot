@@ -24,78 +24,9 @@
 #define AWS_IOT_THING_NAME "esp32-c3_awsiot1"
 #define PING_TARGET_HOST AWS_IOT_ENDPOINT
 
-static const char AWS_ROOT_CA_PEM[] =
-"-----BEGIN CERTIFICATE-----\n"
-"MIIDQTCCAimgAwIBAgITBmyfz5m/jAo54vB4ikPmljZbyjANBgkqhkiG9w0BAQsF\n"
-"ADA5MQswCQYDVQQGEwJVUzEPMA0GA1UEChMGQW1hem9uMRkwFwYDVQQDExBBbWF6\n"
-"b24gUm9vdCBDQSAxMB4XDTE1MDUyNjAwMDAwMFoXDTM4MDExNzAwMDAwMFowOTEL\n"
-"MAkGA1UEBhMCVVMxDzANBgNVBAoTBkFtYXpvbjEZMBcGA1UEAxMQQW1hem9uIFJv\n"
-"b3QgQ0EgMTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALJ4gHHKeNXj\n"
-"ca9HgFB0fW7Y14h29Jlo91ghYPl0hAEvrAIthtOgQ3pOsqTQNroBvo3bSMgHFzZM\n"
-"9O6II8c+6zf1tRn4SWiw3te5djgdYZ6k/oI2peVKVuRF4fn9tBb6dNqcmzU5L/qw\n"
-"IFAGbHrQgLKm+a/sRxmPUDgH3KKHOVj4utWp+UhnMJbulHheb4mjUcAwhmahRWa6\n"
-"VOujw5H5SNz/0egwLX0tdHA114gk957EWW67c4cX8jJGKLhD+rcdqsq08p8kDi1L\n"
-"93FcXmn/6pUCyziKrlA4b9v7LWIbxcceVOF34GfID5yHI9Y/QCB/IIDEgEw+OyQm\n"
-"jgSubJrIqg0CAwEAAaNCMEAwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMC\n"
-"AYYwHQYDVR0OBBYEFIQYzIU07LwMlJQuCFmcx7IQTgoIMA0GCSqGSIb3DQEBCwUA\n"
-"A4IBAQCY8jdaQZChGsV2USggNiMOruYou6r4lK5IpDB/G/wkjUu0yKGX9rbxenDI\n"
-"U5PMCCjjmCXPI6T53iHTfIUJrU6adTrCC2qJeHZERxhlbI1Bjjt/msv0tadQ1wUs\n"
-"N+gDS63pYaACbvXy8MWy7Vu33PqUXHeeE6V/Uq2V8viTO96LXFvKWlJbYK8U90vv\n"
-"o/ufQJVtMVT8QtPHRh8jrdkPSHCa2XV4cdFyQzR1bldZwgJcJmApzyMZFo6IQ6XU\n"
-"5MsI+yMRQ+hDKXJioaldXgjUkK642M4UwtBV8ob2xJNDd2ZhwLnoQdeXeGADbkpy\n"
-"rqXRfboQnoZsG4q5WTP468SQvvG5\n"
-"-----END CERTIFICATE-----\n";
-
-static const char AWS_DEVICE_CERT_PEM[] =
-"-----BEGIN CERTIFICATE-----\n"
-"MIIDWTCCAkGgAwIBAgIUaTn9QsHZ/PnSye6mgp2eVJvBj0owDQYJKoZIhvcNAQEL\n"
-"BQAwTTFLMEkGA1UECwxCQW1hem9uIFdlYiBTZXJ2aWNlcyBPPUFtYXpvbi5jb20g\n"
-"SW5jLiBMPVNlYXR0bGUgU1Q9V2FzaGluZ3RvbiBDPVVTMB4XDTI2MDQxMTIzMTUx\n"
-"MFoXDTQ5MTIzMTIzNTk1OVowHjEcMBoGA1UEAwwTQVdTIElvVCBDZXJ0aWZpY2F0\n"
-"ZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAOSBLRyD8uBJdFfON7z9\n"
-"Q3cDBoMSsW1xPYGkROr4mxHFXQcpYumFxduIYEpzmCKvrRBsS2/pLUrOpXNwZyIm\n"
-"baTIUVdPnhbfA0tJ1iBASeq4K2cO20DImZ8/AJws3ZdPYj7pXHQEztp1TlwVHPAY\n"
-"1RqzKFzos7r+ikAWnoHxnDT/ESM+eiNGrCwbf1isTSGNovj8QCqIS+XBvhJkGOon\n"
-"Zrhbc3lKqETPJrfGZMpbcUbbTfcztKgScz8nEO5xXWP0s1qWEhYJtjwZpe0VzExg\n"
-"aogLIz/fGh9CmATjEn9a0fM/bCMbU7pE+XDRIQBg2vk/b1tWekWHU1F7Z1iubfIl\n"
-"TeMCAwEAAaNgMF4wHwYDVR0jBBgwFoAUemsZHoRqvvRx3su3RBJAuEFLO9MwHQYD\n"
-"VR0OBBYEFFpG4+7PQomOWIcSfmvyuqpRdi2VMAwGA1UdEwEB/wQCMAAwDgYDVR0P\n"
-"AQH/BAQDAgeAMA0GCSqGSIb3DQEBCwUAA4IBAQCMf0wItKHyl93TKk8IYWlBh1qj\n"
-"WRpOAN5Rn1r812WRSRy1kK3mYIF+eLKtkWLce0/m9cIRjreRzyjbQKvM9hy6UpZA\n"
-"btcbmYby4SOZ7efZvftvPPkEsvSqw1bn00tApMElghZZwhiwx/7lrMvPmFuxGdFL\n"
-"DzxCX8MTlXi9wS7xAfAAiyTjfwWUHc1IfZJks761VIOAMjBEZZDuZhDKkSH3GNO/\n"
-"lRg1gto83fkXPbLYO3wH9mWP8Arqb7/zH3xw53UdzMHST7lHuBrm0bUG0QXteM5g\n"
-"IyvaaLIzBGkcPgK15Kxnem2t03WsZDlMcY8gkssDpyebvBGIt2xE0wISC5Da\n"
-"-----END CERTIFICATE-----\n";
-
-static const char AWS_PRIVATE_KEY_PEM[] =
-"-----BEGIN RSA PRIVATE KEY-----\n"
-"MIIEpQIBAAKCAQEA5IEtHIPy4El0V843vP1DdwMGgxKxbXE9gaRE6vibEcVdByli\n"
-"6YXF24hgSnOYIq+tEGxLb+ktSs6lc3BnIiZtpMhRV0+eFt8DS0nWIEBJ6rgrZw7b\n"
-"QMiZnz8AnCzdl09iPulcdATO2nVOXBUc8BjVGrMoXOizuv6KQBaegfGcNP8RIz56\n"
-"I0asLBt/WKxNIY2i+PxAKohL5cG+EmQY6idmuFtzeUqoRM8mt8ZkyltxRttN9zO0\n"
-"qBJzPycQ7nFdY/SzWpYSFgm2PBml7RXMTGBqiAsjP98aH0KYBOMSf1rR8z9sIxtT\n"
-"ukT5cNEhAGDa+T9vW1Z6RYdTUXtnWK5t8iVN4wIDAQABAoIBAQCfQn0bi8eClQ+W\n"
-"hy8H9IjJ8Pzf6+5nte5FZiV2k3EY8LLG5AyBb/AX8zQRkAFv43s+oAvv4tfjdKWS\n"
-"ELyA68GtgMRYkzA/Bo44Mi0ga05ZXqU5ffxIacfQWsvlDcwfwn9aE7GRVyyIzAui\n"
-"WEDEArq8kjPGlZV29iOLSXiOXsQdlnttJ+xJbvzbo7krZ3EH+M2O0pHrzmzYWGU9\n"
-"eGk11aL2xAWVb3dBe1VxmoVRaFfqAQNp7Uu6i+HxS6WbD0xUtwHlMOvVaoCLQY1q\n"
-"7BhjhRw9y+1C9mEnIBQ6G4a5SLkxXf9gN6EsUVL4MbXrjSg1GAXvL3lu66X9ltBJ\n"
-"BLI02O2pAoGBAP1QPdSLVqeGgyYiw9klWN6j2EhiJ5b/NWQHTgwJLFb5DVmrtmNW\n"
-"yNCDZkfG27QClsQACoAMFf4p/6QfsiuYZgs3ciip/NmxhP2Lp7TyJJlr/53nuLOV\n"
-"IDw2UHx14GwyjpWbRefcnFA9B8O95q5yivAZhqGzHkVylvE7ECUqBkO/AoGBAObt\n"
-"k9N1lercwIXq4y098WzO3v5u6Pj4KX1KjHRLAkO3Wi6qkp+M5luDMVaIpg/DllGI\n"
-"i4/i4Wx79gElO0Wc4tbyDnUWCmVMwZGpoBDAoFpcRE/JpQNEwnCkx9vFKVdr2nKi\n"
-"LkS33Uq3r7S3sNkOT93qyCW+oUYtsC1TEEevj67dAoGBANk6W5uOViRZlNQ6UetA\n"
-"PMLIjOwdyEeT2axLG2H05+I5t3ojZ8gunw048Zgx7yyiX7n7MwX111Jbn8+WIsuB\n"
-"6FhMFwjKJXxl4F8xyQLB+CLdW5qFIX5XLwqTpVfmGiuO+3lOa5dXN3ETtTnl+xG0\n"
-"RnN54FuAaEAz8T8zYDgOnsqvAoGADyFl3CcKKZdJLf0T4XT7iouLZNRTg2yPG1x1\n"
-"E3GOtm0fBYu7i6Spuzk/VFIjv0irYrA1pLnS107P8YdE+OysmDTH6bgF+lkrHaYl\n"
-"jLNyTjlZaHjnzO0GaGcDiUzDxqyUZYpmya3aW/jpFEgs2Cvt47ZsYry4yGZZ8r5M\n"
-"hMXl/ikCgYEA0T2onkP2graCGzMqBj6HIY1Gql7Bs9gxvS64r0VdWnAIkqWwftlE\n"
-"mliHPnCxu9+rGLlqVqbZyrVt9wQ+bmee5lIJmJTtyiVWIqQ/p7swn7cmdsKyiL11\n"
-"310t3qs9xp0TrxZ8w6ikDY4UXcx+X0/JvvOaONxsMJmSN/hEm+W72ns=\n"
-"-----END RSA PRIVATE KEY-----\n";
+extern const uint8_t certs_AmazonRootCA1_pem_start[] asm("_binary_certs_AmazonRootCA1_pem_start");
+extern const uint8_t certs_device_cert_pem_start[] asm("_binary_certs_device_cert_pem_start");
+extern const uint8_t certs_private_key_pem_start[] asm("_binary_certs_private_key_pem_start");
 
 static const int WIFI_CONNECTED_BIT = BIT0;
 static EventGroupHandle_t wifi_event_group;
@@ -269,10 +200,10 @@ void app_main(void) {
 
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = uri,
-        .broker.verification.certificate = AWS_ROOT_CA_PEM,
+        .broker.verification.certificate = (const char *)certs_AmazonRootCA1_pem_start,
         .credentials.client_id = "basicPubSub",
-        .credentials.authentication.certificate = AWS_DEVICE_CERT_PEM,
-        .credentials.authentication.key = AWS_PRIVATE_KEY_PEM,
+        .credentials.authentication.certificate = (const char *)certs_device_cert_pem_start,
+        .credentials.authentication.key = (const char *)certs_private_key_pem_start,
     };
 
     esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
