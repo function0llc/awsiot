@@ -33,4 +33,12 @@ config APP_PUBLISH_INTERVAL_MS
     int "Publish interval (ms)"
     default 5000
 
+config APP_LED_SUB_TOPIC
+    string "LED command subscribe topic"
+    default "esp32c3/awsiot1/led/set"
+
+config APP_LED_STATE_TOPIC
+    string "LED state publish topic"
+    default "esp32c3/awsiot1/led/state"
+
 endmenu

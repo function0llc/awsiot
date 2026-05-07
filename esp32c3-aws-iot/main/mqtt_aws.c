@@ -9,12 +9,49 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "led_control.h"
 #include "mqtt_client.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "mqtt_aws";
 
 static esp_mqtt_client_handle_t s_client;
+
+static void mqtt_publish_led_state(const char *state_topic, bool on)
+{
+    char payload[64];
+    int len = snprintf(payload, sizeof(payload), "{\"state\":\"%s\"}", on ? "on" : "off");
+    esp_mqtt_client_publish(s_client, state_topic, payload, len, 1, 0);
+    ESP_LOGI(TAG, "Published LED state: %s", on ? "on" : "off");
+}
+
+static void mqtt_handle_led_command(const char *led_cmd_topic, const char *led_state_topic,
+                                    const char *topic, int topic_len, const char *data, int data_len)
+{
+    if (topic_len == (int)strlen(led_cmd_topic) &&
+        strncmp(topic, led_cmd_topic, topic_len) == 0) {
+        bool led_on = false;
+        bool found = false;
+        char *data_str = strndup(data, data_len);
+        if (data_str != NULL) {
+            if (strstr(data_str, "\"on\"") != NULL || strstr(data_str, "\"state\":\"on\"") != NULL) {
+                led_on = true;
+                found = true;
+            } else if (strstr(data_str, "\"off\"") != NULL || strstr(data_str, "\"state\":\"off\"") != NULL) {
+                led_on = false;
+                found = true;
+            }
+            free(data_str);
+        }
+
+        if (found) {
+            led_control_set(led_on);
+            mqtt_publish_led_state(led_state_topic, led_on);
+        } else {
+            ESP_LOGW(TAG, "Unrecognized LED payload: %.*s", data_len, data);
+        }
+    }
+}
 
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
@@ -25,6 +62,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "Connected to AWS IoT Core");
         esp_mqtt_client_subscribe(s_client, cfg->sub_topic, 1);
+        esp_mqtt_client_subscribe(s_client, cfg->led_cmd_topic, 1);
         esp_mqtt_client_publish(s_client, cfg->pub_topic, "{\"status\":\"boot\"}", 0, 1, 0);
         break;
 
@@ -43,6 +81,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     case MQTT_EVENT_DATA:
         ESP_LOGI(TAG, "Incoming topic=%.*s data=%.*s", event->topic_len, event->topic, event->data_len,
                  event->data);
+        mqtt_handle_led_command(cfg->led_cmd_topic, cfg->led_state_topic,
+                                event->topic, event->topic_len, event->data, event->data_len);
         break;
 
     case MQTT_EVENT_ERROR:
@@ -78,6 +118,8 @@ esp_err_t mqtt_aws_start(void)
 {
     const app_config_t *cfg = app_config_get();
     static char broker_uri[256];
+
+    led_control_init();
 
     int uri_len = snprintf(broker_uri, sizeof(broker_uri), "mqtts://%s:%d", cfg->aws_endpoint, cfg->mqtt_port);
     if (uri_len <= 0 || uri_len >= (int)sizeof(broker_uri)) {

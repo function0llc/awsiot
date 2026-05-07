@@ -34,6 +34,14 @@
 #define CONFIG_APP_PUBLISH_INTERVAL_MS 5000
 #endif
 
+#ifndef CONFIG_APP_LED_SUB_TOPIC
+#define CONFIG_APP_LED_SUB_TOPIC "esp32c3/awsiot1/led/set"
+#endif
+
+#ifndef CONFIG_APP_LED_STATE_TOPIC
+#define CONFIG_APP_LED_STATE_TOPIC "esp32c3/awsiot1/led/state"
+#endif
+
 static const app_config_t APP_CONFIG = {
     .wifi_ssid = CONFIG_APP_WIFI_SSID,
     .wifi_pass = CONFIG_APP_WIFI_PASSWORD,
@@ -41,6 +49,8 @@ static const app_config_t APP_CONFIG = {
     .aws_client_id = CONFIG_APP_AWS_CLIENT_ID,
     .pub_topic = CONFIG_APP_MQTT_PUB_TOPIC,
     .sub_topic = CONFIG_APP_MQTT_SUB_TOPIC,
+    .led_cmd_topic = CONFIG_APP_LED_SUB_TOPIC,
+    .led_state_topic = CONFIG_APP_LED_STATE_TOPIC,
     .mqtt_port = CONFIG_APP_MQTT_PORT,
     .publish_interval_ms = CONFIG_APP_PUBLISH_INTERVAL_MS,
 };

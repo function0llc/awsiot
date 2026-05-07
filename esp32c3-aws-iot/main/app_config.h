@@ -7,6 +7,8 @@ typedef struct {
     const char *aws_client_id;
     const char *pub_topic;
     const char *sub_topic;
+    const char *led_cmd_topic;
+    const char *led_state_topic;
     int mqtt_port;
     int publish_interval_ms;
 } app_config_t;

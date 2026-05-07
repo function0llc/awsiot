@@ -5,7 +5,9 @@ idf_component_register(
         "mqtt_aws.c"
         "app_config.c"
         "time_sync.c"
+        "led_control.c"
     INCLUDE_DIRS "."
+    REQUIRES driver
     EMBED_TXTFILES
         "AmazonRootCA1.pem"
         "device_cert.pem"
