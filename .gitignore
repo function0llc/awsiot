@@ -5,4 +5,5 @@
 .vscode/ipch
 include/wifi_credentials.h
 src/certs/
+src/certs.h
 local_files/

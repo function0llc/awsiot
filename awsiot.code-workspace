@@ -3,6 +3,9 @@
 		{
 			"name": "awsiot",
 			"path": "."
+		},
+		{
+			"path": "../awsiotweb"
 		}
 	],
 	"settings": {}
