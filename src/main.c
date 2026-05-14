@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <stdbool.h>
 #include <time.h>
 
@@ -41,23 +42,468 @@
 /* Configuration constants                                            */
 /* ------------------------------------------------------------------ */
 
-#define AWS_IOT_ENDPOINT   "a3qhmfu2zenmjt-ats.iot.us-west-2.amazonaws.com"
-#define AWS_IOT_PORT       8883
-#define AWS_IOT_THING_NAME "esp32-c3_awsiot1"
-#define PING_TARGET_HOST   AWS_IOT_ENDPOINT
-#define CONTROL_GPIO_PIN   GPIO_NUM_5       /* LED control pin          */
+#define AWS_IOT_ENDPOINT    "a3qhmfu2zenmjt-ats.iot.us-west-2.amazonaws.com"
+#define AWS_IOT_PORT        8883
+#define AWS_IOT_THING_NAME  "esp32-c3_awsiot1"
+#define AWS_IOT_TENANT_ID   "default"
+#define SHADOW_NAME         "gpio"
+#define FW_VERSION          "1.0.0"
+#define PRIMARY_PIN_ID      "17"
+#define PING_TARGET_HOST    AWS_IOT_ENDPOINT
 
 /* MQTT Topics */
-#define TOPIC_EVT_STATE  "tenants/default/devices/" AWS_IOT_THING_NAME "/evt/state"
-#define TOPIC_SHADOW_GET    "$aws/things/" AWS_IOT_THING_NAME "/shadow/get"
-#define TOPIC_SHADOW_UPDATE "$aws/things/" AWS_IOT_THING_NAME "/shadow/update"
-#define TOPIC_SHADOW_DELTA  "$aws/things/" AWS_IOT_THING_NAME "/shadow/update/delta"
+#define TOPIC_CMD_GPIO              "tenants/" AWS_IOT_TENANT_ID "/devices/" AWS_IOT_THING_NAME "/cmd/gpio"
+#define TOPIC_EVT_STATE             "tenants/" AWS_IOT_TENANT_ID "/devices/" AWS_IOT_THING_NAME "/evt/state"
+#define TOPIC_SHADOW_GET            "$aws/things/" AWS_IOT_THING_NAME "/shadow/name/" SHADOW_NAME "/get"
+#define TOPIC_SHADOW_GET_ACCEPTED   "$aws/things/" AWS_IOT_THING_NAME "/shadow/name/" SHADOW_NAME "/get/accepted"
+#define TOPIC_SHADOW_UPDATE         "$aws/things/" AWS_IOT_THING_NAME "/shadow/name/" SHADOW_NAME "/update"
+#define TOPIC_SHADOW_UPDATE_ACCEPTED "$aws/things/" AWS_IOT_THING_NAME "/shadow/name/" SHADOW_NAME "/update/accepted"
+#define TOPIC_SHADOW_DELTA          "$aws/things/" AWS_IOT_THING_NAME "/shadow/name/" SHADOW_NAME "/update/delta"
+
+#define MAX_GPIO_PINS    16
+#define MAX_PIN_ID_LEN   12
+
+typedef struct {
+    char       pin_id[MAX_PIN_ID_LEN];
+    gpio_num_t gpio;
+    bool       drive_hardware;
+    int        level; /* 0 = LOW, 1 = HIGH */
+} gpio_pin_state_t;
+
+static gpio_pin_state_t gpio_pins[MAX_GPIO_PINS] = {
+    /* Dashboard logical pin "17" controls physical GPIO5 on the ESP32-C3 */
+    { .pin_id = PRIMARY_PIN_ID, .gpio = GPIO_NUM_5,  .drive_hardware = true,  .level = 0 },
+    { .pin_id = "18", .gpio = GPIO_NUM_NC, .drive_hardware = false, .level = 0 },
+    { .pin_id = "22", .gpio = GPIO_NUM_NC, .drive_hardware = false, .level = 0 },
+    { .pin_id = "23", .gpio = GPIO_NUM_NC, .drive_hardware = false, .level = 0 },
+    { .pin_id = "24", .gpio = GPIO_NUM_NC, .drive_hardware = false, .level = 0 },
+    { .pin_id = "25", .gpio = GPIO_NUM_NC, .drive_hardware = false, .level = 0 },
+    { .pin_id = "27", .gpio = GPIO_NUM_NC, .drive_hardware = false, .level = 0 },
+};
+
+static size_t gpio_pin_count = 7;
+static double last_shadow_report_ts = 0.0;
 
 #include "certs.h"                          /* CA cert, device cert, key */
 
 static const int WIFI_CONNECTED_BIT = BIT0;
 static EventGroupHandle_t wifi_event_group;
 static const char *TAG = "aws_iot_demo";
+
+/* ------------------------------------------------------------------ */
+/* GPIO pin bookkeeping                                               */
+/* ------------------------------------------------------------------ */
+
+static gpio_pin_state_t *find_pin(const char *pin_id) {
+    if (!pin_id) return NULL;
+    for (size_t i = 0; i < gpio_pin_count; ++i) {
+        if (strcmp(gpio_pins[i].pin_id, pin_id) == 0) {
+            return &gpio_pins[i];
+        }
+    }
+    return NULL;
+}
+
+static gpio_pin_state_t *ensure_pin(const char *pin_id) {
+    gpio_pin_state_t *pin = find_pin(pin_id);
+    if (pin || !pin_id) {
+        return pin;
+    }
+
+    if (gpio_pin_count >= MAX_GPIO_PINS) {
+        ESP_LOGW(TAG, "Maximum GPIO pin entries reached (%d)", MAX_GPIO_PINS);
+        return NULL;
+    }
+
+    gpio_pin_state_t *slot = &gpio_pins[gpio_pin_count++];
+    memset(slot, 0, sizeof(*slot));
+    strlcpy(slot->pin_id, pin_id, sizeof(slot->pin_id));
+    slot->gpio = GPIO_NUM_NC;
+    slot->drive_hardware = false;
+    slot->level = 0;
+    return slot;
+}
+
+static gpio_pin_state_t *primary_pin(void) {
+    return find_pin(PRIMARY_PIN_ID);
+}
+
+static const char *primary_pin_shadow_state(void) {
+    const gpio_pin_state_t *pin = primary_pin();
+    if (!pin) return "off";
+    return pin->level ? "on" : "off";
+}
+
+static bool parse_level(const char *state, int *level_out) {
+    if (!state || !level_out) return false;
+    if (strcasecmp(state, "HIGH") == 0 || strcasecmp(state, "ON") == 0 || strcmp(state, "1") == 0) {
+        *level_out = 1;
+        return true;
+    }
+    if (strcasecmp(state, "LOW") == 0 || strcasecmp(state, "OFF") == 0 || strcmp(state, "0") == 0) {
+        *level_out = 0;
+        return true;
+    }
+    return false;
+}
+
+static bool update_pin_level(gpio_pin_state_t *pin, const char *state) {
+    if (!pin || !state) return false;
+    int new_level = pin->level;
+    if (!parse_level(state, &new_level)) {
+        ESP_LOGW(TAG, "Unsupported GPIO state '%s' for pin %s", state, pin->pin_id);
+        return false;
+    }
+
+    const bool changed = pin->level != new_level;
+    pin->level = new_level;
+
+    if (pin->drive_hardware && GPIO_IS_VALID_OUTPUT_GPIO(pin->gpio)) {
+        esp_err_t err = gpio_set_level(pin->gpio, new_level);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set GPIO%d to %d (err=%s)", pin->gpio, new_level, esp_err_to_name(err));
+        }
+    }
+
+    ESP_LOGI(TAG, "Pin %s mapped to GPIO%d -> %s (changed=%s)",
+             pin->pin_id,
+             pin->gpio,
+             new_level ? "HIGH" : "LOW",
+             changed ? "yes" : "no");
+
+    return changed;
+}
+
+static bool apply_pin_map_from_object(const cJSON *pins) {
+    if (!cJSON_IsObject(pins)) return false;
+    bool mutated = false;
+    const cJSON *entry = NULL;
+    cJSON_ArrayForEach(entry, pins) {
+        if (!cJSON_IsString(entry) || entry->string == NULL) continue;
+        gpio_pin_state_t *pin = ensure_pin(entry->string);
+        if (pin && update_pin_level(pin, entry->valuestring)) {
+            mutated = true;
+        }
+    }
+    return mutated;
+}
+
+static bool apply_default_gpio_state(const char *state_value) {
+    if (!state_value) return false;
+    ESP_LOGI(TAG, "Applying legacy gpio state '%s' to primary pin", state_value);
+    gpio_pin_state_t *pin = ensure_pin(PRIMARY_PIN_ID);
+    if (!pin) return false;
+    return update_pin_level(pin, state_value);
+}
+
+static void configure_gpio_pins(void) {
+    for (size_t i = 0; i < gpio_pin_count; ++i) {
+        if (!gpio_pins[i].drive_hardware || !GPIO_IS_VALID_OUTPUT_GPIO(gpio_pins[i].gpio)) {
+            continue;
+        }
+        gpio_reset_pin(gpio_pins[i].gpio);
+        gpio_set_direction(gpio_pins[i].gpio, GPIO_MODE_OUTPUT);
+        gpio_set_level(gpio_pins[i].gpio, gpio_pins[i].level);
+    }
+}
+
+static void publish_json(esp_mqtt_client_handle_t client, const char *topic, const char *payload) {
+    if (!payload) return;
+    int len = strlen(payload);
+    esp_mqtt_client_publish(client, topic, payload, len, 1, 0);
+}
+
+static cJSON *create_pins_json(void) {
+    cJSON *pins = cJSON_CreateObject();
+    if (!pins) return NULL;
+
+    for (size_t i = 0; i < gpio_pin_count; ++i) {
+        cJSON_AddStringToObject(pins, gpio_pins[i].pin_id, gpio_pins[i].level ? "HIGH" : "LOW");
+    }
+
+    return pins;
+}
+
+static void publish_event_state(esp_mqtt_client_handle_t client, const char *req_id) {
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return;
+
+    cJSON *pins = create_pins_json();
+    if (!pins) {
+        cJSON_Delete(root);
+        return;
+    }
+
+    cJSON_AddItemToObject(root, "pins", pins);
+    cJSON_AddNumberToObject(root, "ts", (double)time(NULL));
+    cJSON_AddStringToObject(root, "fw", FW_VERSION);
+    cJSON_AddStringToObject(root, "gpio", primary_pin_shadow_state());
+    if (req_id) {
+        cJSON_AddStringToObject(root, "reqId", req_id);
+    }
+
+    char *payload = cJSON_PrintUnformatted(root);
+    if (payload) {
+        publish_json(client, TOPIC_EVT_STATE, payload);
+        cJSON_free(payload);
+    }
+    cJSON_Delete(root);
+}
+
+static void publish_shadow_state(esp_mqtt_client_handle_t client, const char *req_id) {
+    cJSON *pins = create_pins_json();
+    if (!pins) return;
+
+    cJSON *reported = cJSON_CreateObject();
+    cJSON *state = cJSON_CreateObject();
+    cJSON *root = cJSON_CreateObject();
+    if (!reported || !state || !root) {
+        cJSON_Delete(pins);
+        cJSON_Delete(reported);
+        cJSON_Delete(state);
+        cJSON_Delete(root);
+        return;
+    }
+
+    cJSON_AddItemToObject(reported, "pins", pins);
+    double now_ts = (double)time(NULL);
+    cJSON_AddNumberToObject(reported, "ts", now_ts);
+    cJSON_AddStringToObject(reported, "fw", FW_VERSION);
+    cJSON_AddStringToObject(reported, "gpio", primary_pin_shadow_state());
+    cJSON_AddItemToObject(state, "reported", reported);
+    cJSON_AddItemToObject(root, "state", state);
+    if (req_id) {
+        cJSON_AddStringToObject(root, "clientToken", req_id);
+    }
+
+    char *payload = cJSON_PrintUnformatted(root);
+    if (payload) {
+        publish_json(client, TOPIC_SHADOW_UPDATE, payload);
+        cJSON_free(payload);
+    }
+    cJSON_Delete(root);
+
+    last_shadow_report_ts = now_ts;
+}
+
+static void sync_reported_state(esp_mqtt_client_handle_t client, const char *req_id) {
+    publish_event_state(client, req_id);
+    publish_shadow_state(client, req_id);
+}
+
+static void handle_gpio_command_message(esp_mqtt_client_handle_t client, const char *payload, int len) {
+    cJSON *root = cJSON_ParseWithLength(payload, len);
+    if (!root) return;
+
+    const cJSON *pin = cJSON_GetObjectItemCaseSensitive(root, "pin");
+    const cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
+    const cJSON *req_id = cJSON_GetObjectItemCaseSensitive(root, "reqId");
+    const cJSON *mode = cJSON_GetObjectItemCaseSensitive(root, "mode");
+
+    if (cJSON_IsString(pin) && cJSON_IsString(state)) {
+        gpio_pin_state_t *pin_entry = ensure_pin(pin->valuestring);
+        if (pin_entry && update_pin_level(pin_entry, state->valuestring)) {
+            ESP_LOGI(TAG, "Applied GPIO command: pin=%s state=%s mode=%s", pin->valuestring, state->valuestring, cJSON_IsString(mode) ? mode->valuestring : "n/a");
+            sync_reported_state(client, cJSON_IsString(req_id) ? req_id->valuestring : NULL);
+        } else if (pin_entry) {
+            /* Even if unchanged, echo state so UI confirms */
+            sync_reported_state(client, cJSON_IsString(req_id) ? req_id->valuestring : NULL);
+        }
+    }
+
+    cJSON_Delete(root);
+}
+
+static void handle_shadow_delta_message(esp_mqtt_client_handle_t client, const char *payload, int len) {
+    cJSON *root = cJSON_ParseWithLength(payload, len);
+    if (!root) return;
+
+    const cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
+    const cJSON *delta = cJSON_IsObject(state) ? cJSON_GetObjectItemCaseSensitive(state, "delta") : NULL;
+    const cJSON *desired = cJSON_IsObject(state) ? cJSON_GetObjectItemCaseSensitive(state, "desired") : NULL;
+    const cJSON *pins = cJSON_IsObject(delta) ? cJSON_GetObjectItemCaseSensitive(delta, "pins") : NULL;
+    const cJSON *desired_pins = cJSON_IsObject(desired) ? cJSON_GetObjectItemCaseSensitive(desired, "pins") : NULL;
+    const cJSON *metadata_root = cJSON_GetObjectItemCaseSensitive(root, "metadata");
+
+    bool changed = false;
+    ESP_LOGI(TAG, "Processing shadow delta payload");
+    if (cJSON_IsObject(pins)) {
+        changed = apply_pin_map_from_object(pins);
+    } else if (cJSON_IsObject(desired_pins)) {
+        changed = apply_pin_map_from_object(desired_pins);
+    } else {
+        typedef enum {
+            LEGACY_SOURCE_NONE,
+            LEGACY_SOURCE_DELTA,
+            LEGACY_SOURCE_DESIRED,
+            LEGACY_SOURCE_STATE
+        } legacy_source_t;
+
+        legacy_source_t legacy_source = LEGACY_SOURCE_NONE;
+        const cJSON *legacy_gpio = NULL;
+        if (cJSON_IsObject(delta)) {
+            const cJSON *candidate = cJSON_GetObjectItemCaseSensitive(delta, "gpio");
+            if (cJSON_IsString(candidate)) {
+                legacy_gpio = candidate;
+                legacy_source = LEGACY_SOURCE_DELTA;
+            }
+        }
+        if (!legacy_gpio && cJSON_IsObject(desired)) {
+            const cJSON *candidate = cJSON_GetObjectItemCaseSensitive(desired, "gpio");
+            if (cJSON_IsString(candidate)) {
+                legacy_gpio = candidate;
+                legacy_source = LEGACY_SOURCE_DESIRED;
+            }
+        }
+        if (!legacy_gpio && cJSON_IsObject(state)) {
+            const cJSON *candidate = cJSON_GetObjectItemCaseSensitive(state, "gpio");
+            if (cJSON_IsString(candidate)) {
+                legacy_gpio = candidate;
+                legacy_source = LEGACY_SOURCE_STATE;
+            }
+        }
+
+        const cJSON *legacy_meta = NULL;
+        if (legacy_source != LEGACY_SOURCE_NONE && cJSON_IsObject(metadata_root)) {
+            switch (legacy_source) {
+                case LEGACY_SOURCE_DELTA:
+                    legacy_meta = cJSON_GetObjectItemCaseSensitive(metadata_root, "delta");
+                    if (legacy_meta) legacy_meta = cJSON_GetObjectItemCaseSensitive(legacy_meta, "gpio");
+                    break;
+                case LEGACY_SOURCE_DESIRED:
+                    legacy_meta = cJSON_GetObjectItemCaseSensitive(metadata_root, "desired");
+                    if (legacy_meta) legacy_meta = cJSON_GetObjectItemCaseSensitive(legacy_meta, "gpio");
+                    break;
+                case LEGACY_SOURCE_STATE:
+                    legacy_meta = cJSON_GetObjectItemCaseSensitive(metadata_root, "gpio");
+                    if (!legacy_meta) {
+                        legacy_meta = cJSON_GetObjectItemCaseSensitive(metadata_root, "state");
+                        if (legacy_meta) legacy_meta = cJSON_GetObjectItemCaseSensitive(legacy_meta, "gpio");
+                    }
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        if (cJSON_IsString(legacy_gpio)) {
+            bool stale = false;
+            if (legacy_meta && cJSON_IsObject(legacy_meta)) {
+                const cJSON *ts_node = cJSON_GetObjectItemCaseSensitive(legacy_meta, "timestamp");
+                if (cJSON_IsNumber(ts_node)) {
+                    double ts_value = ts_node->valuedouble;
+                    if (last_shadow_report_ts > 0.0 && ts_value <= last_shadow_report_ts) {
+                        stale = true;
+                        ESP_LOGW(TAG, "Ignoring stale legacy gpio delta (ts=%.0f, last_report=%.0f)", ts_value, last_shadow_report_ts);
+                    }
+                }
+            }
+
+            if (!stale) {
+                changed = apply_default_gpio_state(legacy_gpio->valuestring);
+            }
+        } else {
+            const cJSON *entry = NULL;
+            cJSON_ArrayForEach(entry, delta) {
+                if (cJSON_IsString(entry)) {
+                    changed = apply_default_gpio_state(entry->valuestring) || changed;
+                }
+            }
+            if (!changed && cJSON_IsObject(desired)) {
+                cJSON_ArrayForEach(entry, desired) {
+                    if (cJSON_IsString(entry)) {
+                        changed = apply_default_gpio_state(entry->valuestring) || changed;
+                    }
+                }
+            }
+            if (!changed) {
+                ESP_LOGW(TAG, "Shadow delta payload missing expected fields");
+            }
+        }
+    }
+
+    if (changed) {
+        sync_reported_state(client, NULL);
+    }
+
+    cJSON_Delete(root);
+}
+
+static void handle_shadow_get_message(esp_mqtt_client_handle_t client, const char *payload, int len) {
+    cJSON *root = cJSON_ParseWithLength(payload, len);
+    if (!root) return;
+
+    const cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
+    const cJSON *desired = cJSON_IsObject(state) ? cJSON_GetObjectItemCaseSensitive(state, "desired") : NULL;
+    const cJSON *desired_pins = cJSON_IsObject(desired) ? cJSON_GetObjectItemCaseSensitive(desired, "pins") : NULL;
+    const cJSON *metadata_root = cJSON_GetObjectItemCaseSensitive(root, "metadata");
+
+    bool changed = false;
+    if (cJSON_IsObject(desired_pins)) {
+        changed = apply_pin_map_from_object(desired_pins);
+    } else {
+        const cJSON *legacy_gpio = cJSON_IsObject(desired) ? cJSON_GetObjectItemCaseSensitive(desired, "gpio") : NULL;
+        if (!cJSON_IsString(legacy_gpio) && cJSON_IsObject(state)) {
+            legacy_gpio = cJSON_GetObjectItemCaseSensitive(state, "gpio");
+        }
+        if (cJSON_IsString(legacy_gpio)) {
+            bool stale = false;
+            if (cJSON_IsObject(metadata_root)) {
+                const cJSON *meta_desired = cJSON_GetObjectItemCaseSensitive(metadata_root, "desired");
+                const cJSON *meta_gpio = NULL;
+                if (meta_desired) {
+                    meta_gpio = cJSON_GetObjectItemCaseSensitive(meta_desired, "gpio");
+                }
+                if (!meta_gpio) {
+                    meta_gpio = cJSON_GetObjectItemCaseSensitive(metadata_root, "gpio");
+                }
+                if (meta_gpio) {
+                    const cJSON *ts_node = cJSON_GetObjectItemCaseSensitive(meta_gpio, "timestamp");
+                    if (cJSON_IsNumber(ts_node) && last_shadow_report_ts > 0.0 && ts_node->valuedouble <= last_shadow_report_ts) {
+                        stale = true;
+                        ESP_LOGW(TAG, "Ignoring stale legacy gpio from get (ts=%.0f, last_report=%.0f)", ts_node->valuedouble, last_shadow_report_ts);
+                    }
+                }
+            }
+
+            if (!stale) {
+                changed = apply_default_gpio_state(legacy_gpio->valuestring);
+            }
+        } else {
+            const cJSON *entry = NULL;
+            if (cJSON_IsObject(desired)) {
+                cJSON_ArrayForEach(entry, desired) {
+                    if (cJSON_IsString(entry)) {
+                        changed = apply_default_gpio_state(entry->valuestring) || changed;
+                    }
+                }
+            }
+            if (!changed && cJSON_IsObject(state)) {
+                cJSON_ArrayForEach(entry, state) {
+                    if (cJSON_IsString(entry)) {
+                        changed = apply_default_gpio_state(entry->valuestring) || changed;
+                    }
+                }
+            }
+            if (!changed) {
+                ESP_LOGW(TAG, "Shadow get payload missing desired pins/gpio fields");
+            }
+        }
+    }
+
+    if (changed) {
+        sync_reported_state(client, NULL);
+    } else {
+        publish_event_state(client, NULL);
+    }
+
+    cJSON_Delete(root);
+}
+
+static bool topic_matches(const char *incoming, int incoming_len, const char *expected) {
+    size_t expected_len = strlen(expected);
+    return (incoming_len == (int)expected_len) && strncmp(incoming, expected, expected_len) == 0;
+}
 
 /* ------------------------------------------------------------------ */
 /* Wi-Fi helpers                                                      */
@@ -179,13 +625,17 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         case MQTT_EVENT_CONNECTED:
             ESP_LOGI(TAG, "Connected to AWS IoT Core");
 
-            /* Subscribe to shadow delta topic for GPIO control */
-            int msg_id = esp_mqtt_client_subscribe(client, TOPIC_SHADOW_DELTA, 1);
-            ESP_LOGI(TAG, "Subscribed to %s (msg_id=%d)", TOPIC_SHADOW_DELTA, msg_id);
+            esp_mqtt_client_subscribe(client, TOPIC_CMD_GPIO, 1);
+            esp_mqtt_client_subscribe(client, TOPIC_SHADOW_DELTA, 1);
+            esp_mqtt_client_subscribe(client, TOPIC_SHADOW_GET_ACCEPTED, 1);
+            esp_mqtt_client_subscribe(client, TOPIC_SHADOW_UPDATE_ACCEPTED, 1);
 
             /* Request current shadow state on boot */
-            esp_mqtt_client_publish(client, TOPIC_SHADOW_GET, "", 0, 0, 0);
+            esp_mqtt_client_publish(client, TOPIC_SHADOW_GET, "{}", 2, 1, 0);
             ESP_LOGI(TAG, "Requested shadow state via %s", TOPIC_SHADOW_GET);
+
+            /* Broadcast our current GPIO state */
+            sync_reported_state(client, NULL);
             break;
 
         case MQTT_EVENT_SUBSCRIBED:
@@ -199,51 +649,15 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         case MQTT_EVENT_DATA:
             ESP_LOGI(TAG, "Topic: %.*s", event->topic_len, event->topic);
             ESP_LOGI(TAG, "Data:  %.*s", event->data_len, event->data);
-
-            /* Check if this message is on the shadow delta topic */
-            char *topic = strndup(event->topic, event->topic_len);
-            if (strstr(topic, "shadow/update/delta") != NULL) {
-                cJSON *root = cJSON_ParseWithLength(event->data, event->data_len);
-                if (root != NULL) {
-                    cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
-                    if (cJSON_IsObject(state)) {
-                        /* Delta payload has state.delta.gpio or state.desired.gpio */
-                        cJSON *delta = cJSON_GetObjectItemCaseSensitive(state, "delta");
-                        cJSON *gpio = NULL;
-                        if (cJSON_IsObject(delta)) {
-                            gpio = cJSON_GetObjectItemCaseSensitive(delta, "gpio");
-                        }
-                        /* Fallback to desired if delta is not present */
-                        if (!cJSON_IsString(gpio)) {
-                            cJSON *desired = cJSON_GetObjectItemCaseSensitive(state, "desired");
-                            if (cJSON_IsObject(desired)) {
-                                gpio = cJSON_GetObjectItemCaseSensitive(desired, "gpio");
-                            }
-                        }
-                        if (cJSON_IsString(gpio) && gpio->valuestring != NULL) {
-                            if (strcmp(gpio->valuestring, "on") == 0) {
-                                gpio_set_level(CONTROL_GPIO_PIN, 1);
-                                ESP_LOGI(TAG, "GPIO pin set HIGH");
-                            } else if (strcmp(gpio->valuestring, "off") == 0) {
-                                gpio_set_level(CONTROL_GPIO_PIN, 0);
-                                ESP_LOGI(TAG, "GPIO pin set LOW");
-                            }
-
-                            /* Publish reported state back to shadow */
-                            time_t now;
-                            time(&now);
-                            char shadow_payload[128];
-                            int shadow_len = snprintf(shadow_payload, sizeof(shadow_payload),
-                                "{\"state\":{\"reported\":{\"gpio\":\"%s\"}},\"timestamp\":%ld}",
-                                gpio->valuestring, (long)now);
-                            esp_mqtt_client_publish(client, TOPIC_SHADOW_UPDATE, shadow_payload, shadow_len, 1, 0);
-                            ESP_LOGI(TAG, "Published reported shadow: %s", shadow_payload);
-                        }
-                    }
-                    cJSON_Delete(root);
-                }
+            if (topic_matches(event->topic, event->topic_len, TOPIC_CMD_GPIO)) {
+                handle_gpio_command_message(client, event->data, event->data_len);
+            } else if (topic_matches(event->topic, event->topic_len, TOPIC_SHADOW_DELTA)) {
+                handle_shadow_delta_message(client, event->data, event->data_len);
+            } else if (topic_matches(event->topic, event->topic_len, TOPIC_SHADOW_GET_ACCEPTED)) {
+                handle_shadow_get_message(client, event->data, event->data_len);
+            } else if (topic_matches(event->topic, event->topic_len, TOPIC_SHADOW_UPDATE_ACCEPTED)) {
+                ESP_LOGI(TAG, "Shadow update acknowledged");
             }
-            free(topic);
             break;
 
         case MQTT_EVENT_ERROR:
@@ -373,10 +787,8 @@ void app_main(void) {
         .credentials.authentication.key  = private_key_pem,
     };
 
-    /* 7. Configure GPIO pin for LED output (default LOW) */
-    gpio_reset_pin(CONTROL_GPIO_PIN);
-    gpio_set_direction(CONTROL_GPIO_PIN, GPIO_MODE_OUTPUT);
-    gpio_set_level(CONTROL_GPIO_PIN, 0);
+    /* 7. Configure GPIO pins defined in gpio_pins[] */
+    configure_gpio_pins();
 
     /* 8. Create, register callbacks, and start the MQTT client */
     esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
@@ -385,24 +797,9 @@ void app_main(void) {
     ESP_ERROR_CHECK(esp_mqtt_client_start(client));
 
     /* 9. Main publish loop */
-    uint32_t counter = 0;
-    char     payload[256];
-
     while (1) {
-        time_t now;
-        time(&now);
-        int gpio_level = gpio_get_level(CONTROL_GPIO_PIN);
-        const char *gpio_state = (gpio_level == 1) ? "on" : "off";
-
-        int len = snprintf(payload, sizeof(payload),
-                           "{\"thing\":\"%s\",\"pins\":{\"5\":\"%s\"},\"count\":%lu,\"ts\":%ld,\"fw\":\"1.0.0\"}",
-                           AWS_IOT_THING_NAME, gpio_state, (unsigned long)counter++, (long)now);
-
-        /* Roll over at 5 000 messages */
-        if (counter >= 5000) counter = 0;
-
-        esp_mqtt_client_publish(client, TOPIC_EVT_STATE, payload, len, 1, 0);
-        ESP_LOGI(TAG, "Published: %s", payload);
+        publish_event_state(client, NULL);
+        ESP_LOGI(TAG, "Published periodic GPIO state");
 
         /* Publish every 15 minutes */
         vTaskDelay(pdMS_TO_TICKS(15 * 60 * 1000));
