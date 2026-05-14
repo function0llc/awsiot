@@ -22,6 +22,8 @@
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
+#include "driver/rmt_tx.h"
+#include "led_strip.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -64,21 +66,22 @@
 #define MAX_PIN_ID_LEN   12
 
 typedef struct {
-    char       pin_id[MAX_PIN_ID_LEN];
-    gpio_num_t gpio;
-    bool       drive_hardware;
-    int        level; /* 0 = LOW, 1 = HIGH */
+    char                pin_id[MAX_PIN_ID_LEN];
+    gpio_num_t          gpio;
+    bool                drive_hardware;
+    bool                is_ws2812b;
+    int                 level; /* 0 = LOW, 1 = HIGH */
+    led_strip_handle_t  led_strip;
 } gpio_pin_state_t;
 
 static gpio_pin_state_t gpio_pins[MAX_GPIO_PINS] = {
-    /* Dashboard logical pin "17" controls physical GPIO5 on the ESP32-C3 */
-    { .pin_id = PRIMARY_PIN_ID, .gpio = GPIO_NUM_5,  .drive_hardware = true,  .level = 0 },
-    { .pin_id = "18", .gpio = GPIO_NUM_NC, .drive_hardware = false, .level = 0 },
-    { .pin_id = "22", .gpio = GPIO_NUM_NC, .drive_hardware = false, .level = 0 },
-    { .pin_id = "23", .gpio = GPIO_NUM_NC, .drive_hardware = false, .level = 0 },
-    { .pin_id = "24", .gpio = GPIO_NUM_NC, .drive_hardware = false, .level = 0 },
-    { .pin_id = "25", .gpio = GPIO_NUM_NC, .drive_hardware = false, .level = 0 },
-    { .pin_id = "27", .gpio = GPIO_NUM_NC, .drive_hardware = false, .level = 0 },
+    { .pin_id = PRIMARY_PIN_ID, .gpio = GPIO_NUM_8,  .drive_hardware = true,  .is_ws2812b = false, .level = 0, .led_strip = NULL },
+    { .pin_id = "18", .gpio = GPIO_NUM_NC, .drive_hardware = false, .is_ws2812b = false, .level = 0, .led_strip = NULL },
+    { .pin_id = "22", .gpio = GPIO_NUM_NC, .drive_hardware = false, .is_ws2812b = false, .level = 0, .led_strip = NULL },
+    { .pin_id = "23", .gpio = GPIO_NUM_NC, .drive_hardware = false, .is_ws2812b = false, .level = 0, .led_strip = NULL },
+    { .pin_id = "24", .gpio = GPIO_NUM_NC, .drive_hardware = false, .is_ws2812b = false, .level = 0, .led_strip = NULL },
+    { .pin_id = "25", .gpio = GPIO_NUM_NC, .drive_hardware = false, .is_ws2812b = false, .level = 0, .led_strip = NULL },
+    { .pin_id = "27", .gpio = GPIO_NUM_NC, .drive_hardware = false, .is_ws2812b = false, .level = 0, .led_strip = NULL },
 };
 
 static size_t gpio_pin_count = 7;
@@ -120,7 +123,9 @@ static gpio_pin_state_t *ensure_pin(const char *pin_id) {
     strlcpy(slot->pin_id, pin_id, sizeof(slot->pin_id));
     slot->gpio = GPIO_NUM_NC;
     slot->drive_hardware = false;
+    slot->is_ws2812b = false;
     slot->level = 0;
+    slot->led_strip = NULL;
     return slot;
 }
 
@@ -158,10 +163,29 @@ static bool update_pin_level(gpio_pin_state_t *pin, const char *state) {
     const bool changed = pin->level != new_level;
     pin->level = new_level;
 
-    if (pin->drive_hardware && GPIO_IS_VALID_OUTPUT_GPIO(pin->gpio)) {
-        esp_err_t err = gpio_set_level(pin->gpio, new_level);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to set GPIO%d to %d (err=%s)", pin->gpio, new_level, esp_err_to_name(err));
+    if (pin->drive_hardware) {
+        if (pin->is_ws2812b && pin->led_strip) {
+            esp_err_t err;
+            if (new_level) {
+                err = led_strip_set_pixel(pin->led_strip, 0, 255, 50, 0);
+                ESP_LOGI(TAG, "WS2812B set to ON (255,50,0)");
+            } else {
+                err = led_strip_set_pixel(pin->led_strip, 0, 0, 0, 0);
+                ESP_LOGI(TAG, "WS2812B set to OFF (0,0,0)");
+            }
+            if (err == ESP_OK) {
+                err = led_strip_refresh(pin->led_strip);
+            }
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to set WS2812B for pin %s (err=%s)", pin->pin_id, esp_err_to_name(err));
+            }
+        } else if (GPIO_IS_VALID_OUTPUT_GPIO(pin->gpio)) {
+            int gpio_level = new_level ? 1 : 0;
+            gpio_level = !gpio_level;
+            esp_err_t err = gpio_set_level(pin->gpio, gpio_level);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to set GPIO%d to %d (err=%s)", pin->gpio, gpio_level, esp_err_to_name(err));
+            }
         }
     }
 
@@ -198,12 +222,33 @@ static bool apply_default_gpio_state(const char *state_value) {
 
 static void configure_gpio_pins(void) {
     for (size_t i = 0; i < gpio_pin_count; ++i) {
-        if (!gpio_pins[i].drive_hardware || !GPIO_IS_VALID_OUTPUT_GPIO(gpio_pins[i].gpio)) {
+        if (!gpio_pins[i].drive_hardware) {
             continue;
         }
-        gpio_reset_pin(gpio_pins[i].gpio);
-        gpio_set_direction(gpio_pins[i].gpio, GPIO_MODE_OUTPUT);
-        gpio_set_level(gpio_pins[i].gpio, gpio_pins[i].level);
+
+        if (gpio_pins[i].is_ws2812b) {
+            led_strip_config_t strip_config = {
+                .strip_gpio_num = gpio_pins[i].gpio,
+                .max_leds = 1,
+                .led_pixel_format = LED_PIXEL_FORMAT_GRB,
+                .led_model = LED_MODEL_WS2812,
+            };
+            led_strip_rmt_config_t rmt_config = {
+                .resolution_hz = 10 * 1000 * 1000,
+            };
+            esp_err_t err = led_strip_new_rmt_device(&strip_config, &rmt_config, &gpio_pins[i].led_strip);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to create WS2812B device for pin %s GPIO%d (err=%s)",
+                         gpio_pins[i].pin_id, gpio_pins[i].gpio, esp_err_to_name(err));
+            } else {
+                ESP_LOGI(TAG, "WS2812B initialized on GPIO%d for pin %s", gpio_pins[i].gpio, gpio_pins[i].pin_id);
+                led_strip_clear(gpio_pins[i].led_strip);
+            }
+        } else if (GPIO_IS_VALID_OUTPUT_GPIO(gpio_pins[i].gpio)) {
+            gpio_reset_pin(gpio_pins[i].gpio);
+            gpio_set_direction(gpio_pins[i].gpio, GPIO_MODE_OUTPUT);
+            gpio_set_level(gpio_pins[i].gpio, gpio_pins[i].level);
+        }
     }
 }
 

@@ -1,4 +1,4 @@
 idf_component_register(
     SRCS "main.c"
-    REQUIRES esp_event esp_netif esp_wifi mqtt nvs_flash
+    REQUIRES esp_event esp_netif esp_wifi mqtt nvs_flash led_strip driver json
 )
