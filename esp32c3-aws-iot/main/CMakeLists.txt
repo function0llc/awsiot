@@ -7,9 +7,9 @@ idf_component_register(
         "time_sync.c"
         "led_control.c"
     INCLUDE_DIRS "."
-    REQUIRES driver
+    REQUIRES driver json
     EMBED_TXTFILES
-        "AmazonRootCA1.pem"
-        "device_cert.pem"
-        "private_key.pem"
+        "certs/AmazonRootCA1.pem"
+        "certs/device_cert.pem"
+        "certs/private_key.pem"
 )

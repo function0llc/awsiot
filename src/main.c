@@ -5,8 +5,9 @@
  * MQTT connection to AWS IoT Core using X.509 certificate authentication.
  *
  * Features:
- *   - Periodic publishing to "sdk/test/python" (every 15 minutes, counter 0-4999)
- *   - LED/GPIO control via MQTT topic "<thing_name>/led/set" with JSON payload {"message":"on"|"off"}
+ *   - Periodic publishing to "tenants/default/devices/esp32-c3_awsiot1/evt/state" (every 15 minutes, counter 0-4999)
+ *   - Device shadow updates via "$aws/things/esp32-c3_awsiot1/shadow/name/gpio/update"
+ *   - LED/GPIO control via shadow topic with JSON payload {"state":{"desired":{"gpio":"on"|"off"}}}
  *   - Network connectivity verification via ICMP ping at startup
  */
 
@@ -14,6 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <time.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -44,6 +46,12 @@
 #define AWS_IOT_THING_NAME "esp32-c3_awsiot1"
 #define PING_TARGET_HOST   AWS_IOT_ENDPOINT
 #define CONTROL_GPIO_PIN   GPIO_NUM_5       /* LED control pin          */
+
+/* MQTT Topics */
+#define TOPIC_EVT_STATE  "tenants/default/devices/" AWS_IOT_THING_NAME "/evt/state"
+#define TOPIC_SHADOW_GET    "$aws/things/" AWS_IOT_THING_NAME "/shadow/get"
+#define TOPIC_SHADOW_UPDATE "$aws/things/" AWS_IOT_THING_NAME "/shadow/update"
+#define TOPIC_SHADOW_DELTA  "$aws/things/" AWS_IOT_THING_NAME "/shadow/update/delta"
 
 #include "certs.h"                          /* CA cert, device cert, key */
 
@@ -157,8 +165,8 @@ static void time_sync_init(void) {
 /**
  * Handles MQTT lifecycle events.
  *
- * - CONNECTED : subscribes to the data topic and the LED control topic.
- * - DATA      : logs the message; if it arrives on the "led/set" topic,
+ * - CONNECTED : subscribes to the event state topic and shadow delta topic.
+ * - DATA      : logs the message; if it arrives on the shadow delta topic,
  *               parses the JSON body and toggles the GPIO pin.
  * - ERROR     : logs the failure.
  */
@@ -171,33 +179,65 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         case MQTT_EVENT_CONNECTED:
             ESP_LOGI(TAG, "Connected to AWS IoT Core");
 
-            /* Subscribe to the general data topic */
-            esp_mqtt_client_subscribe(client, "sdk/test/python", 1);
+            /* Subscribe to shadow delta topic for GPIO control */
+            int msg_id = esp_mqtt_client_subscribe(client, TOPIC_SHADOW_DELTA, 1);
+            ESP_LOGI(TAG, "Subscribed to %s (msg_id=%d)", TOPIC_SHADOW_DELTA, msg_id);
 
-            /* Subscribe to the LED control topic: <thing>/led/set */
-            char control_topic[128];
-            snprintf(control_topic, sizeof(control_topic),
-                     "%s/led/set", AWS_IOT_THING_NAME);
-            esp_mqtt_client_subscribe(client, control_topic, 1);
+            /* Request current shadow state on boot */
+            esp_mqtt_client_publish(client, TOPIC_SHADOW_GET, "", 0, 0, 0);
+            ESP_LOGI(TAG, "Requested shadow state via %s", TOPIC_SHADOW_GET);
+            break;
+
+        case MQTT_EVENT_SUBSCRIBED:
+            ESP_LOGI(TAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
+            break;
+
+        case MQTT_EVENT_PUBLISHED:
+            ESP_LOGI(TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
             break;
 
         case MQTT_EVENT_DATA:
             ESP_LOGI(TAG, "Topic: %.*s", event->topic_len, event->topic);
             ESP_LOGI(TAG, "Data:  %.*s", event->data_len, event->data);
 
-            /* Check if this message is on the LED control topic */
+            /* Check if this message is on the shadow delta topic */
             char *topic = strndup(event->topic, event->topic_len);
-            if (strstr(topic, "led/set") != NULL) {
+            if (strstr(topic, "shadow/update/delta") != NULL) {
                 cJSON *root = cJSON_ParseWithLength(event->data, event->data_len);
                 if (root != NULL) {
-                    cJSON *msg = cJSON_GetObjectItemCaseSensitive(root, "message");
-                    if (cJSON_IsString(msg) && msg->valuestring != NULL) {
-                        if (strcmp(msg->valuestring, "on") == 0) {
-                            gpio_set_level(CONTROL_GPIO_PIN, 1);
-                            ESP_LOGI(TAG, "GPIO pin set HIGH");
-                        } else if (strcmp(msg->valuestring, "off") == 0) {
-                            gpio_set_level(CONTROL_GPIO_PIN, 0);
-                            ESP_LOGI(TAG, "GPIO pin set LOW");
+                    cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
+                    if (cJSON_IsObject(state)) {
+                        /* Delta payload has state.delta.gpio or state.desired.gpio */
+                        cJSON *delta = cJSON_GetObjectItemCaseSensitive(state, "delta");
+                        cJSON *gpio = NULL;
+                        if (cJSON_IsObject(delta)) {
+                            gpio = cJSON_GetObjectItemCaseSensitive(delta, "gpio");
+                        }
+                        /* Fallback to desired if delta is not present */
+                        if (!cJSON_IsString(gpio)) {
+                            cJSON *desired = cJSON_GetObjectItemCaseSensitive(state, "desired");
+                            if (cJSON_IsObject(desired)) {
+                                gpio = cJSON_GetObjectItemCaseSensitive(desired, "gpio");
+                            }
+                        }
+                        if (cJSON_IsString(gpio) && gpio->valuestring != NULL) {
+                            if (strcmp(gpio->valuestring, "on") == 0) {
+                                gpio_set_level(CONTROL_GPIO_PIN, 1);
+                                ESP_LOGI(TAG, "GPIO pin set HIGH");
+                            } else if (strcmp(gpio->valuestring, "off") == 0) {
+                                gpio_set_level(CONTROL_GPIO_PIN, 0);
+                                ESP_LOGI(TAG, "GPIO pin set LOW");
+                            }
+
+                            /* Publish reported state back to shadow */
+                            time_t now;
+                            time(&now);
+                            char shadow_payload[128];
+                            int shadow_len = snprintf(shadow_payload, sizeof(shadow_payload),
+                                "{\"state\":{\"reported\":{\"gpio\":\"%s\"}},\"timestamp\":%ld}",
+                                gpio->valuestring, (long)now);
+                            esp_mqtt_client_publish(client, TOPIC_SHADOW_UPDATE, shadow_payload, shadow_len, 1, 0);
+                            ESP_LOGI(TAG, "Published reported shadow: %s", shadow_payload);
                         }
                     }
                     cJSON_Delete(root);
@@ -211,6 +251,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             break;
 
         default:
+            ESP_LOGD(TAG, "MQTT event: %ld", (long)event_id);
             break;
     }
 }
@@ -327,7 +368,7 @@ void app_main(void) {
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri              = uri,
         .broker.verification.certificate = AmazonRootCA1_pem,
-        .credentials.client_id           = "basicPubSub",
+        .credentials.client_id           = AWS_IOT_THING_NAME,
         .credentials.authentication.certificate = device_cert_pem,
         .credentials.authentication.key  = private_key_pem,
     };
@@ -345,17 +386,22 @@ void app_main(void) {
 
     /* 9. Main publish loop */
     uint32_t counter = 0;
-    char     payload[128];
+    char     payload[256];
 
     while (1) {
+        time_t now;
+        time(&now);
+        int gpio_level = gpio_get_level(CONTROL_GPIO_PIN);
+        const char *gpio_state = (gpio_level == 1) ? "on" : "off";
+
         int len = snprintf(payload, sizeof(payload),
-                           "{\"thing\":\"%s\",\"count\":%lu}",
-                           AWS_IOT_THING_NAME, (unsigned long)counter++);
+                           "{\"thing\":\"%s\",\"pins\":{\"5\":\"%s\"},\"count\":%lu,\"ts\":%ld,\"fw\":\"1.0.0\"}",
+                           AWS_IOT_THING_NAME, gpio_state, (unsigned long)counter++, (long)now);
 
         /* Roll over at 5 000 messages */
         if (counter >= 5000) counter = 0;
 
-        esp_mqtt_client_publish(client, "sdk/test/python", payload, len, 1, 0);
+        esp_mqtt_client_publish(client, TOPIC_EVT_STATE, payload, len, 1, 0);
         ESP_LOGI(TAG, "Published: %s", payload);
 
         /* Publish every 15 minutes */

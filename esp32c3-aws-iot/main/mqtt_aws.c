@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "app_config.h"
 #include "certs.h"
@@ -12,45 +13,93 @@
 #include "led_control.h"
 #include "mqtt_client.h"
 #include "sdkconfig.h"
+#include "cJSON.h"
 
 static const char *TAG = "mqtt_aws";
 
 static esp_mqtt_client_handle_t s_client;
 
-static void mqtt_publish_led_state(const char *state_topic, bool on)
+static void mqtt_publish_shadow_update(const char *gpio_state);
+
+static void mqtt_apply_gpio_state(const char *gpio_state)
 {
-    char payload[64];
-    int len = snprintf(payload, sizeof(payload), "{\"state\":\"%s\"}", on ? "on" : "off");
-    esp_mqtt_client_publish(s_client, state_topic, payload, len, 1, 0);
-    ESP_LOGI(TAG, "Published LED state: %s", on ? "on" : "off");
+    if (gpio_state == NULL) return;
+
+    if (strcmp(gpio_state, "on") == 0 || strcmp(gpio_state, "HIGH") == 0) {
+        led_control_set(true);
+        ESP_LOGI(TAG, "GPIO pin set HIGH");
+        mqtt_publish_shadow_update("on");
+    } else if (strcmp(gpio_state, "off") == 0 || strcmp(gpio_state, "LOW") == 0) {
+        led_control_set(false);
+        ESP_LOGI(TAG, "GPIO pin set LOW");
+        mqtt_publish_shadow_update("off");
+    } else {
+        ESP_LOGW(TAG, "Ignoring unsupported GPIO state: %s", gpio_state);
+    }
 }
 
-static void mqtt_handle_led_command(const char *led_cmd_topic, const char *led_state_topic,
-                                    const char *topic, int topic_len, const char *data, int data_len)
+static void mqtt_publish_shadow_update(const char *gpio_state)
 {
-    if (topic_len == (int)strlen(led_cmd_topic) &&
-        strncmp(topic, led_cmd_topic, topic_len) == 0) {
-        bool led_on = false;
-        bool found = false;
-        char *data_str = strndup(data, data_len);
-        if (data_str != NULL) {
-            if (strstr(data_str, "\"on\"") != NULL || strstr(data_str, "\"state\":\"on\"") != NULL) {
-                led_on = true;
-                found = true;
-            } else if (strstr(data_str, "\"off\"") != NULL || strstr(data_str, "\"state\":\"off\"") != NULL) {
-                led_on = false;
-                found = true;
-            }
-            free(data_str);
-        }
+    const app_config_t *cfg = app_config_get();
+    char payload[128];
+    time_t now;
+    time(&now);
+    int len = snprintf(payload, sizeof(payload),
+        "{\"state\":{\"reported\":{\"gpio\":\"%s\"}},\"timestamp\":%ld}",
+        gpio_state, (long)now);
+    esp_mqtt_client_publish(s_client, cfg->shadow_update_topic, payload, len, 1, 0);
+    ESP_LOGI(TAG, "Published shadow update: gpio=%s", gpio_state);
+}
 
-        if (found) {
-            led_control_set(led_on);
-            mqtt_publish_led_state(led_state_topic, led_on);
-        } else {
-            ESP_LOGW(TAG, "Unrecognized LED payload: %.*s", data_len, data);
+static void mqtt_handle_shadow_delta(const char *topic, int topic_len, const char *data, int data_len)
+{
+    if (topic == NULL || data == NULL) return;
+    const app_config_t *cfg = app_config_get();
+    int shadow_topic_len = (int)strlen(cfg->shadow_delta_topic);
+    if (topic_len != shadow_topic_len) return;
+    if (strncmp(topic, cfg->shadow_delta_topic, topic_len) != 0) return;
+
+    cJSON *root = cJSON_ParseWithLength(data, data_len);
+    if (root == NULL) return;
+
+    cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
+    if (cJSON_IsObject(state)) {
+        cJSON *delta = cJSON_GetObjectItemCaseSensitive(state, "delta");
+        cJSON *gpio = NULL;
+        if (cJSON_IsObject(delta)) {
+            gpio = cJSON_GetObjectItemCaseSensitive(delta, "gpio");
+        }
+        if (!cJSON_IsString(gpio)) {
+            cJSON *desired = cJSON_GetObjectItemCaseSensitive(state, "desired");
+            if (cJSON_IsObject(desired)) {
+                gpio = cJSON_GetObjectItemCaseSensitive(desired, "gpio");
+            }
+        }
+        if (cJSON_IsString(gpio) && gpio->valuestring != NULL) {
+            mqtt_apply_gpio_state(gpio->valuestring);
         }
     }
+    cJSON_Delete(root);
+}
+
+static void mqtt_handle_direct_gpio_command(const char *topic, int topic_len, const char *data, int data_len)
+{
+    if (topic == NULL || data == NULL) return;
+
+    const app_config_t *cfg = app_config_get();
+    int cmd_topic_len = (int)strlen(cfg->sub_topic);
+    if (topic_len != cmd_topic_len) return;
+    if (strncmp(topic, cfg->sub_topic, topic_len) != 0) return;
+
+    cJSON *root = cJSON_ParseWithLength(data, data_len);
+    if (root == NULL) return;
+
+    cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
+    if (cJSON_IsString(state) && state->valuestring != NULL) {
+        mqtt_apply_gpio_state(state->valuestring);
+    }
+
+    cJSON_Delete(root);
 }
 
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
@@ -62,8 +111,11 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "Connected to AWS IoT Core");
         esp_mqtt_client_subscribe(s_client, cfg->sub_topic, 1);
-        esp_mqtt_client_subscribe(s_client, cfg->led_cmd_topic, 1);
-        esp_mqtt_client_publish(s_client, cfg->pub_topic, "{\"status\":\"boot\"}", 0, 1, 0);
+        ESP_LOGI(TAG, "Subscribed to direct GPIO commands: %s", cfg->sub_topic);
+        esp_mqtt_client_subscribe(s_client, cfg->shadow_delta_topic, 1);
+        ESP_LOGI(TAG, "Subscribed to shadow delta: %s", cfg->shadow_delta_topic);
+        esp_mqtt_client_publish(s_client, cfg->shadow_get_topic, "", 0, 0, 0);
+        ESP_LOGI(TAG, "Requested shadow state via %s", cfg->shadow_get_topic);
         break;
 
     case MQTT_EVENT_DISCONNECTED:
@@ -71,18 +123,18 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         break;
 
     case MQTT_EVENT_SUBSCRIBED:
-        ESP_LOGI(TAG, "Subscribed to topic, msg_id=%d", event->msg_id);
+        ESP_LOGI(TAG, "Subscribed, msg_id=%d", event->msg_id);
         break;
 
     case MQTT_EVENT_PUBLISHED:
-        ESP_LOGI(TAG, "Published message, msg_id=%d", event->msg_id);
+        ESP_LOGI(TAG, "Published, msg_id=%d", event->msg_id);
         break;
 
     case MQTT_EVENT_DATA:
         ESP_LOGI(TAG, "Incoming topic=%.*s data=%.*s", event->topic_len, event->topic, event->data_len,
                  event->data);
-        mqtt_handle_led_command(cfg->led_cmd_topic, cfg->led_state_topic,
-                                event->topic, event->topic_len, event->data, event->data_len);
+        mqtt_handle_direct_gpio_command(event->topic, event->topic_len, event->data, event->data_len);
+        mqtt_handle_shadow_delta(event->topic, event->topic_len, event->data, event->data_len);
         break;
 
     case MQTT_EVENT_ERROR:
@@ -98,16 +150,19 @@ static void mqtt_publish_task(void *arg)
 {
     const app_config_t *cfg = app_config_get();
     uint32_t counter = 0;
-    char payload[128];
+    char payload[256];
 
     while (true) {
         if (s_client != NULL) {
+            time_t now;
+            time(&now);
+            bool gpio_on = led_control_get();
+            const char *gpio_state = gpio_on ? "on" : "off";
             int len = snprintf(payload, sizeof(payload),
-                               "{\"device\":\"%s\",\"counter\":%lu}",
-                               cfg->aws_client_id,
-                               (unsigned long)counter++);
+                               "{\"thing\":\"esp32-c3_awsiot1\",\"pins\":{\"5\":\"%s\"},\"count\":%lu,\"ts\":%ld,\"fw\":\"1.0.0\"}",
+                               gpio_state, (unsigned long)counter++, (long)now);
             if (len > 0 && len < (int)sizeof(payload)) {
-                esp_mqtt_client_publish(s_client, cfg->pub_topic, payload, 0, 1, 0);
+                esp_mqtt_client_publish(s_client, cfg->pub_topic, payload, len, 1, 0);
             }
         }
         vTaskDelay(pdMS_TO_TICKS(cfg->publish_interval_ms));

@@ -4,31 +4,37 @@
     {
       "Effect": "Allow",
       "Action": "iot:Connect",
-      "Resource": "arn:aws:iot:us-west-2:ACCOUNT_ID:client/basicPubSub"
+      "Resource": "arn:aws:iot:us-west-2:504382039131:client/esp32-c3_awsiot1"
     },
     {
       "Effect": "Allow",
       "Action": "iot:Subscribe",
       "Resource": [
-        "arn:aws:iot:us-west-2:ACCOUNT_ID:topicfilter/esp32c3/awsiot1/led/set",
-        "arn:aws:iot:us-west-2:ACCOUNT_ID:topicfilter/sdk/test/python"
+        "arn:aws:iot:us-west-2:504382039131:topicfilter/tenants/default/devices/esp32-c3_awsiot1/cmd/gpio",
+        "arn:aws:iot:us-west-2:504382039131:topicfilter/$aws/things/esp32-c3_awsiot1/shadow/name/gpio/update/delta"
       ]
     },
     {
       "Effect": "Allow",
       "Action": "iot:Receive",
       "Resource": [
-        "arn:aws:iot:us-west-2:ACCOUNT_ID:topic/esp32c3/awsiot1/led/set",
-        "arn:aws:iot:us-west-2:ACCOUNT_ID:topic/sdk/test/python"
+        "arn:aws:iot:us-west-2:504382039131:topic/tenants/default/devices/esp32-c3_awsiot1/cmd/gpio",
+        "arn:aws:iot:us-west-2:504382039131:topic/$aws/things/esp32-c3_awsiot1/shadow/name/gpio/update/delta"
       ]
     },
     {
       "Effect": "Allow",
       "Action": "iot:Publish",
       "Resource": [
-        "arn:aws:iot:us-west-2:ACCOUNT_ID:topic/esp32c3/awsiot1/led/state",
-        "arn:aws:iot:us-west-2:ACCOUNT_ID:topic/sdk/test/python"
+        "arn:aws:iot:us-west-2:504382039131:topic/tenants/default/devices/esp32-c3_awsiot1/evt/state",
+        "arn:aws:iot:us-west-2:504382039131:topic/$aws/things/esp32-c3_awsiot1/shadow/name/gpio/update",
+        "arn:aws:iot:us-west-2:504382039131:topic/$aws/things/esp32-c3_awsiot1/shadow/name/gpio/get"
       ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["iot:UpdateThingShadow", "iot:GetThingShadow"],
+      "Resource": "arn:aws:iot:us-west-2:504382039131:topic/$aws/things/esp32-c3_awsiot1/shadow/name/gpio/*"
     }
   ]
 }

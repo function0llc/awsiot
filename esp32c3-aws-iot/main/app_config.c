@@ -11,7 +11,39 @@
 #endif
 
 #ifndef CONFIG_APP_AWS_ENDPOINT
-#define CONFIG_APP_AWS_ENDPOINT "xxxxxxxxxxxxx-ats.iot.us-west-2.amazonaws.com"
+#define CONFIG_APP_AWS_ENDPOINT "a3qhmfu2zenmjt-ats.iot.us-west-2.amazonaws.com"
+#endif
+
+#ifndef CONFIG_APP_AWS_CLIENT_ID
+#define CONFIG_APP_AWS_CLIENT_ID "esp32-c3_awsiot1"
+#endif
+
+#ifndef CONFIG_APP_MQTT_PUB_TOPIC
+#define CONFIG_APP_MQTT_PUB_TOPIC "tenants/default/devices/esp32-c3_awsiot1/evt/state"
+#endif
+
+#ifndef CONFIG_APP_MQTT_SUB_TOPIC
+#define CONFIG_APP_MQTT_SUB_TOPIC "tenants/default/devices/esp32-c3_awsiot1/cmd/gpio"
+#endif
+
+#ifndef CONFIG_APP_SHADOW_GET_TOPIC
+#define CONFIG_APP_SHADOW_GET_TOPIC "$aws/things/esp32-c3_awsiot1/shadow/name/gpio/get"
+#endif
+
+#ifndef CONFIG_APP_SHADOW_UPDATE_TOPIC
+#define CONFIG_APP_SHADOW_UPDATE_TOPIC "$aws/things/esp32-c3_awsiot1/shadow/name/gpio/update"
+#endif
+
+#ifndef CONFIG_APP_SHADOW_DELTA_TOPIC
+#define CONFIG_APP_SHADOW_DELTA_TOPIC "$aws/things/esp32-c3_awsiot1/shadow/name/gpio/update/delta"
+#endif
+
+#ifndef CONFIG_APP_LED_SUB_TOPIC
+#define CONFIG_APP_LED_SUB_TOPIC "$aws/things/esp32-c3_awsiot1/shadow/name/gpio/update/delta"
+#endif
+
+#ifndef CONFIG_APP_LED_STATE_TOPIC
+#define CONFIG_APP_LED_STATE_TOPIC "$aws/things/esp32-c3_awsiot1/shadow/name/gpio/update"
 #endif
 
 #ifndef CONFIG_APP_AWS_CLIENT_ID
@@ -49,6 +81,9 @@ static const app_config_t APP_CONFIG = {
     .aws_client_id = CONFIG_APP_AWS_CLIENT_ID,
     .pub_topic = CONFIG_APP_MQTT_PUB_TOPIC,
     .sub_topic = CONFIG_APP_MQTT_SUB_TOPIC,
+    .shadow_get_topic = CONFIG_APP_SHADOW_GET_TOPIC,
+    .shadow_update_topic = CONFIG_APP_SHADOW_UPDATE_TOPIC,
+    .shadow_delta_topic = CONFIG_APP_SHADOW_DELTA_TOPIC,
     .led_cmd_topic = CONFIG_APP_LED_SUB_TOPIC,
     .led_state_topic = CONFIG_APP_LED_STATE_TOPIC,
     .mqtt_port = CONFIG_APP_MQTT_PORT,
